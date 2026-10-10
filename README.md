@@ -78,7 +78,7 @@ pytest
 
 ## How the code maps to the eight steps
 
-| # | Article step | Implementation |
+| # | Step | Implementation |
 |---|---|---|
 | 1 | Define scope and authority | `AgentCharter`: purpose, allowed tools, explicit `prohibited_actions`, allowed data classes. Contradictory charters are rejected at creation. |
 | 2 | Map identity and access | Dedicated `credential_id` per agent; per-tool least-privilege `ToolPolicy`; `allowed_peer_agents` allow-list for agent-to-agent trust. |
@@ -181,7 +181,7 @@ else:
 
 ## Alignment with standards
 
-The article cites these frameworks as relevant to agentic governance. This code is **not** a certified implementation of any of them, and the controls are not formally mapped to specific clauses.
+This code is **not** a certified implementation of any of them, and the controls are not formally mapped to specific clauses.
 
 - [NIST AI Risk Management Framework](https://www.nist.gov/itl/ai-risk-management-framework)
 - [ISO/IEC 42001:2023](https://www.iso.org/standard/42001) (AI management systems)
