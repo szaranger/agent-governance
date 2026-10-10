@@ -1,6 +1,7 @@
 """Steps 4 + 7: runtime enforcement, kill switch, and lifecycle."""
 from __future__ import annotations
 
+import math
 import time
 from collections import deque
 from dataclasses import asdict
@@ -40,6 +41,8 @@ class GovernanceGateway:
     # ---- lifecycle -------------------------------------------------------- #
     def advance(self, to: Lifecycle, actor: str) -> None:
         order = [Lifecycle.DESIGN, Lifecycle.DEVELOPMENT, Lifecycle.TESTING, Lifecycle.DEPLOYED]
+        if to not in order:
+            raise GovernanceError(f"cannot advance to {to.value}; use suspend(), resume() or decommission()")
         if to == Lifecycle.DEPLOYED:
             if self.state != Lifecycle.TESTING:
                 raise GovernanceError("must pass through pre-deployment testing before deployment")
@@ -49,7 +52,7 @@ class GovernanceGateway:
             if not ok:
                 raise GovernanceError(f"deployment blocked: {why}")
             self.credential_active = True
-        elif to in order and (self.state not in order or order.index(to) != order.index(self.state) + 1):
+        elif self.state not in order or order.index(to) != order.index(self.state) + 1:
             raise GovernanceError(f"invalid transition {self.state.value} -> {to.value}")
         self.audit.record("lifecycle", agent=self.charter.agent_id, frm=self.state.value, to=to.value, actor=actor)
         self.state = to
@@ -63,17 +66,26 @@ class GovernanceGateway:
     def suspend(self, by: str, reason: str) -> None:
         if by != self.charter.owners.intervention_owner:
             raise PermissionError(f"{by} is not the intervention owner")
+        if self.state != Lifecycle.DEPLOYED:
+            raise GovernanceError(f"cannot suspend from state {self.state.value}")
         self.state = Lifecycle.SUSPENDED
         self.audit.record("suspended", agent=self.charter.agent_id, by=by, reason=reason)
 
     def resume(self, by: str, reason: str) -> None:
         if by != self.charter.owners.accountable_executive:
             raise PermissionError("only the accountable executive can resume a suspended agent")
+        if self.state != Lifecycle.SUSPENDED:
+            raise GovernanceError(f"cannot resume from state {self.state.value}")
         self.state = Lifecycle.DEPLOYED
         self.audit.record("resumed", agent=self.charter.agent_id, by=by, reason=reason)
 
     def decommission(self, by: str) -> None:
         """Authority ends as deliberately as it began: revoke access, keep records."""
+        owners = self.charter.owners
+        if by not in (owners.accountable_executive, owners.intervention_owner):
+            raise PermissionError("only the accountable executive or intervention owner can decommission")
+        if self.state == Lifecycle.DECOMMISSIONED:
+            raise GovernanceError("agent is already decommissioned")
         self.credential_active = False
         self.state = Lifecycle.DECOMMISSIONED
         self.audit.record("decommissioned", agent=self.charter.agent_id, by=by,
@@ -101,14 +113,20 @@ class GovernanceGateway:
     def _deny(self, why: str) -> GovernanceResult:
         return GovernanceResult(Decision.DENY, why)
 
+    def _operational_denial(self) -> GovernanceResult | None:
+        if self.state != Lifecycle.DEPLOYED or not self.credential_active:
+            return self._deny(f"agent not operational (state={self.state.value})")
+        if now() > self.charter.authority_expires:
+            return self._deny("delegated authority expired; re-attestation required")
+        return None
+
     def _evaluate(self, req: ActionRequest) -> GovernanceResult:
         c = self.charter
         if req.agent_id != c.agent_id:
             return self._deny("identity mismatch")
-        if self.state != Lifecycle.DEPLOYED or not self.credential_active:
-            return self._deny(f"agent not operational (state={self.state.value})")
-        if now() > c.authority_expires:
-            return self._deny("delegated authority expired; re-attestation required")
+        denial = self._operational_denial()
+        if denial:
+            return denial
 
         # Agent-to-agent trust: peers must be explicitly allowed
         if req.peer_agent and req.peer_agent not in c.allowed_peer_agents:
@@ -140,15 +158,19 @@ class GovernanceGateway:
 
         # Parameter validation (input checking against policy)
         for v in policy.validators:
-            err = v(req.params)
+            try:
+                err = v(req.params)
+            except Exception as exc:
+                return self._deny(f"validator error: {type(exc).__name__}")
             if err:
                 return self._deny(f"validation failed: {err}")
 
         # Thresholds: hard limit -> deny; approval threshold -> escalate
         if policy.approval_param:
             val = req.params.get(policy.approval_param)
-            if not isinstance(val, (int, float)):
-                return self._deny(f"'{policy.approval_param}' missing or non-numeric")
+            # bool is an int subclass, and NaN compares False against every limit.
+            if isinstance(val, bool) or not isinstance(val, (int, float)) or not math.isfinite(val):
+                return self._deny(f"'{policy.approval_param}' missing, non-numeric or non-finite")
             if policy.hard_limit is not None and val > policy.hard_limit:
                 return self._deny(f"{policy.approval_param}={val} exceeds hard limit {policy.hard_limit}")
             if policy.approval_threshold is not None and val > policy.approval_threshold:
@@ -160,7 +182,20 @@ class GovernanceGateway:
 
     def execute_approved(self, approval_id: str) -> GovernanceResult:
         """After a human approves, the (already-validated) request may proceed once."""
-        if not self.approvals.is_approved(approval_id):
+        result = self._release(approval_id)
+        self.audit.record("approved_action_release", approval_id=approval_id,
+                          decision=result.decision.value, reason=result.reason)
+        return result
+
+    def _release(self, approval_id: str) -> GovernanceResult:
+        item = self.approvals.get(approval_id)
+        if item is None or item.request.agent_id != self.charter.agent_id:
             return self._deny("no valid approval")
-        self.audit.record("approved_action_released", approval_id=approval_id)
+        denial = self._operational_denial()
+        if denial:
+            return denial
+        try:
+            self.approvals.consume(approval_id)
+        except ValueError:
+            return self._deny("no valid approval")
         return GovernanceResult(Decision.ALLOW, "released after human approval", approval_id)

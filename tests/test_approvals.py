@@ -43,6 +43,26 @@ class ApprovalQueueTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.queue.decide(aid, "manager@corp", True)
 
+    def test_consume_is_single_use(self):
+        aid = self.queue.submit(self.req, "over threshold", "manager@corp")
+        self.queue.decide(aid, "manager@corp", True)
+        item = self.queue.consume(aid)
+        self.assertEqual(item.status, "executed")
+        self.assertFalse(self.queue.is_approved(aid))
+        self.assertEqual(self.audit.entries[-1]["event"], "approval_consumed")
+        with self.assertRaises(ValueError):
+            self.queue.consume(aid)
+
+    def test_cannot_consume_unapproved_or_unknown(self):
+        aid = self.queue.submit(self.req, "over threshold", "manager@corp")
+        with self.assertRaises(ValueError):
+            self.queue.consume(aid)
+        self.queue.decide(aid, "manager@corp", False)
+        with self.assertRaises(ValueError):
+            self.queue.consume(aid)
+        with self.assertRaises(ValueError):
+            self.queue.consume("nope")
+
 
 if __name__ == "__main__":
     unittest.main()

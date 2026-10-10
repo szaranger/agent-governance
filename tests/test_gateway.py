@@ -36,6 +36,14 @@ class LifecycleGateTests(unittest.TestCase):
         with self.assertRaises(GovernanceError):
             gw.advance(Lifecycle.DEPLOYED, "eng")
 
+    def test_advance_cannot_suspend_or_decommission(self):
+        gw = GovernanceGateway(make_charter())
+        deploy(gw)
+        for target in (Lifecycle.SUSPENDED, Lifecycle.DECOMMISSIONED):
+            with self.assertRaises(GovernanceError):
+                gw.advance(target, "anyone")
+        self.assertEqual(gw.state, Lifecycle.DEPLOYED)
+
 
 class EnforcementTests(unittest.TestCase):
     def setUp(self):
@@ -108,6 +116,27 @@ class EnforcementTests(unittest.TestCase):
         r = self.gw.authorize(self.request(params={"vendor_approved": True}))
         self.assertEqual(r.decision, Decision.DENY)
 
+    def test_non_finite_or_bool_amount_denied(self):
+        for amount in (float("nan"), float("inf"), True):
+            with self.subTest(amount=amount):
+                r = self.gw.authorize(self.request(params={"amount": amount, "vendor_approved": True}))
+                self.assertEqual(r.decision, Decision.DENY)
+                self.assertIn("non-finite", r.reason)
+
+    def test_raising_validator_denied_and_logged(self):
+        def boom(params):
+            raise KeyError("vendor_id")
+
+        gw = GovernanceGateway(make_charter())
+        gw.charter.tools["erp"].validators.append(boom)
+        deploy(gw)
+        r = gw.authorize(self.request())
+        self.assertEqual(r.decision, Decision.DENY)
+        self.assertIn("validator error", r.reason)
+        last = gw.audit.entries[-1]
+        self.assertEqual(last["event"], "action_decision")
+        self.assertEqual(last["decision"], "deny")
+
     def test_lifecycle_denies_when_not_deployed(self):
         gw = GovernanceGateway(make_charter())
         r = gw.authorize(ActionRequest(agent_id="procurement-agent-01", tool="erp",
@@ -154,6 +183,28 @@ class ApprovalFlowTests(unittest.TestCase):
         r = self.gw.execute_approved("nonexistent-id")
         self.assertEqual(r.decision, Decision.DENY)
 
+    def approved_id(self) -> str:
+        result = self.gw.authorize(ActionRequest(
+            agent_id="procurement-agent-01", tool="erp", action="create_purchase_order",
+            params={"amount": 12_000, "vendor_approved": True},
+            data_classes={"procurement"}, on_behalf_of="alice@corp"))
+        self.gw.approvals.decide(result.approval_id, "proc-manager@corp", True)
+        return result.approval_id
+
+    def test_approval_cannot_be_replayed(self):
+        aid = self.approved_id()
+        self.assertEqual(self.gw.execute_approved(aid).decision, Decision.ALLOW)
+        second = self.gw.execute_approved(aid)
+        self.assertEqual(second.decision, Decision.DENY)
+
+    def test_approval_not_released_while_suspended(self):
+        aid = self.approved_id()
+        self.gw.suspend("sec-oncall@corp", "investigating")
+        r = self.gw.execute_approved(aid)
+        self.assertEqual(r.decision, Decision.DENY)
+        self.assertIn("not operational", r.reason)
+        self.assertTrue(self.gw.approvals.is_approved(aid))
+
 
 class KillSwitchTests(unittest.TestCase):
     def setUp(self):
@@ -187,6 +238,29 @@ class KillSwitchTests(unittest.TestCase):
         self.gw.suspend("sec-oncall@corp", "reason")
         with self.assertRaises(PermissionError):
             self.gw.resume("sec-oncall@corp", "unauthorised")
+
+    def test_resume_requires_suspended_state(self):
+        with self.assertRaises(GovernanceError):
+            self.gw.resume("cfo@corp", "not suspended")
+        self.gw.decommission("cfo@corp")
+        with self.assertRaises(GovernanceError):
+            self.gw.resume("cfo@corp", "revive")
+        self.assertEqual(self.gw.state, Lifecycle.DECOMMISSIONED)
+
+    def test_suspend_requires_deployed_state(self):
+        self.gw.decommission("cfo@corp")
+        with self.assertRaises(GovernanceError):
+            self.gw.suspend("sec-oncall@corp", "already gone")
+
+    def test_decommission_requires_authorised_owner(self):
+        with self.assertRaises(PermissionError):
+            self.gw.decommission("intruder@corp")
+        self.assertEqual(self.gw.state, Lifecycle.DEPLOYED)
+
+    def test_decommission_twice_rejected(self):
+        self.gw.decommission("sec-oncall@corp")
+        with self.assertRaises(GovernanceError):
+            self.gw.decommission("cfo@corp")
 
     def test_decommission_revokes_credential(self):
         self.gw.decommission("cfo@corp")

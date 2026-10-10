@@ -13,12 +13,36 @@ This framework puts that control in code. The agent never calls tools directly. 
 ## Requirements
 
 - Python 3.10+
-- No third-party packages
+- No third-party runtime packages (pytest is only needed for the test suite)
+
+## Project layout
+
+```
+agent-governance/
+├── pyproject.toml
+└── src/agent_governance/
+    ├── types.py       # charter, owners, tool policy, impact assessment, requests
+    ├── audit.py       # tamper-evident audit log (step 5)
+    ├── approvals.py   # human approval queue (step 6)
+    ├── drift.py       # drift monitor (step 8)
+    ├── gateway.py     # runtime enforcement + lifecycle + shutdown (steps 4, 7)
+    └── demo.py        # procurement-agent demo
+```
 
 ## Quick start
 
+Using [uv](https://docs.astral.sh/uv/) (recommended):
+
 ```bash
-python agent_governance.py
+uv sync                 # creates .venv, installs the package and dev deps
+uv run python -m agent_governance.demo
+```
+
+Or with plain pip:
+
+```bash
+pip install -e .
+python -m agent_governance.demo
 ```
 
 This runs a demo of the article's procurement-agent example:
@@ -35,6 +59,23 @@ Untrusted peer agent                       -> DENY     peer agent 'random-agent'
 Routine PO after suspension                -> DENY     agent not operational (state=suspended)
 ```
 
+## Tests
+
+With uv:
+
+```bash
+uv run python -m unittest discover -s tests   # stdlib runner
+uv run pytest                                 # pytest, installed by uv sync
+```
+
+Or with plain pip:
+
+```bash
+python -m unittest discover -s tests          # stdlib runner, no dependencies
+pip install -e ".[dev]"                       # or: install pytest first
+pytest
+```
+
 ## How the code maps to the eight steps
 
 | # | Article step | Implementation |
@@ -45,7 +86,7 @@ Routine PO after suspension                -> DENY     agent not operational (st
 | 4 | Runtime controls | `GovernanceGateway.authorize()` returns `ALLOW`, `ESCALATE` or `DENY` (see the evaluation order below). |
 | 5 | Logging and traceability | `AuditLog`: append-only and hash-chained. Editing any past entry makes `verify()` fail. Entries carry agent, session and `on_behalf_of` attribution. |
 | 6 | Human oversight thresholds | `ApprovalQueue` routes over-threshold actions to a named approver and enforces separation of duties (requesters cannot approve their own actions). |
-| 7 | Incident response and shutdown | `suspend()` (intervention owner only), `resume()` (accountable executive only), `decommission()` (revokes credentials, retains records). |
+| 7 | Incident response and shutdown | `suspend()` (intervention owner only), `resume()` (accountable executive only), `decommission()` (accountable executive or intervention owner; revokes credentials, retains records). Each is guarded to the lifecycle state it applies to. |
 | 8 | Ongoing evaluation and drift | `DriftMonitor` flags high deny or escalation rates and tools outside the baseline. Delegated authority expires unless an owner calls `attest()`. |
 
 ## Core concepts
@@ -74,8 +115,8 @@ Routine PO after suspension                -> DENY     agent not operational (st
 6. Tool and action are in scope
 7. Data classes are in scope
 8. Per-tool rate limit
-9. Custom parameter validators
-10. Hard limit (deny) and approval threshold (escalate)
+9. Custom parameter validators (a raising validator denies rather than crashing the gateway)
+10. Thresholds: hard limit (deny) and approval threshold (escalate); non-numeric, boolean and non-finite (NaN/±inf) values are denied
 
 ## Usage
 
@@ -134,7 +175,7 @@ else:
 - **Enforcement only works if routed.** Wrap your real tool layer (for example your MCP client or API clients) so nothing bypasses `authorize()`. For MCP and A2A, also inspect tool definitions and the data exchanged on each call.
 - **Persistence.** The audit log and approval queue are in memory by default. Use durable, access-controlled storage and ship the audit log to an external or write-once sink.
 - **Configurable values.** Thresholds, rate limits, tier sign-off counts and review intervals are illustrative defaults. Set them from your own risk appetite.
-- **Approved-action replay.** `execute_approved()` authorises a request but does not mark it consumed. Add single-use handling in your integration.
+- **Approved actions.** Approvals are single-use: `execute_approved()` consumes the approval (its status moves to `executed`) and cannot release while the agent is suspended, decommissioned or past its authority period. A consumed approval cannot be replayed. Approvals do not expire on their own, so add a time limit in your integration if you need one.
 - **Identity.** `credential_id` is a label here. Integrate with your IAM so the gateway controls real credential issuance and revocation.
 - **Drift review.** Call `gw.drift.report()` on a schedule and route findings to the monitoring owner. Reassess permissions periodically, since drift often appears as expanding authority rather than changing outputs.
 

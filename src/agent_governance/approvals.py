@@ -14,7 +14,7 @@ class PendingApproval:
     request: ActionRequest
     reason: str
     approver: str
-    status: str = "pending"          # pending | approved | rejected
+    status: str = "pending"          # pending | approved | rejected | executed
     decided_by: str | None = None
 
 
@@ -43,5 +43,17 @@ class ApprovalQueue:
         self._audit.record("approval_decided", approval_id=approval_id, by=by, status=item.status)
         return item
 
+    def get(self, approval_id: str) -> PendingApproval | None:
+        return self._items.get(approval_id)
+
     def is_approved(self, approval_id: str) -> bool:
         return self._items.get(approval_id, None) is not None and self._items[approval_id].status == "approved"
+
+    def consume(self, approval_id: str) -> PendingApproval:
+        """Single use: an approval releases its action once, then can never be reused."""
+        item = self._items.get(approval_id)
+        if item is None or item.status != "approved":
+            raise ValueError("no unused approval with that id")
+        item.status = "executed"
+        self._audit.record("approval_consumed", approval_id=approval_id)
+        return item
