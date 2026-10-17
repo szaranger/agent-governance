@@ -1,8 +1,10 @@
 """Core types: lifecycle, risk tiers, decision outcomes, and the agent charter."""
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Callable
@@ -80,6 +82,40 @@ class AgentCharter:
         overlap = self.prohibited_actions & {a for t in self.tools.values() for a in t.allowed_actions}
         if overlap:
             raise ValueError(f"Charter contradicts itself; actions both allowed and prohibited: {overlap}")
+
+    def digest(self) -> str:
+        """Stable hash of the charter that was in force for a decision.
+
+        Validator callables are not hashed; only their count is. Swap a function
+        for another and the digest does not change.
+        """
+        tools = {
+            name: {
+                "name": policy.name,
+                "allowed_actions": sorted(policy.allowed_actions),
+                "approval_param": policy.approval_param,
+                "approval_threshold": policy.approval_threshold,
+                "hard_limit": policy.hard_limit,
+                "max_calls_per_minute": policy.max_calls_per_minute,
+                "validator_count": len(policy.validators),
+            }
+            for name, policy in self.tools.items()
+        }
+        payload = {
+            "agent_id": self.agent_id,
+            "purpose": self.purpose,
+            "tier": self.tier.value,
+            "owners": asdict(self.owners),
+            "credential_id": self.credential_id,
+            "tools": tools,
+            "prohibited_actions": sorted(self.prohibited_actions),
+            "allowed_data_classes": sorted(self.allowed_data_classes),
+            "review_interval_days": self.review_interval_days,
+            "authority_expires": self.authority_expires.isoformat() if self.authority_expires else None,
+            "allowed_peer_agents": sorted(self.allowed_peer_agents),
+        }
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        return hashlib.sha256(encoded).hexdigest()
 
 
 @dataclass

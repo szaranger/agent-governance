@@ -63,6 +63,35 @@ class ApprovalQueueTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.queue.consume("nope")
 
+    def test_expired_approval_cannot_be_decided_or_consumed(self):
+        from datetime import timedelta
+
+        from agent_governance import now
+
+        aid = self.queue.submit(self.req, "over threshold", "manager@corp")
+        self.queue.get(aid).expires_at = now() - timedelta(seconds=1)
+        with self.assertRaises(ValueError):
+            self.queue.decide(aid, "manager@corp", True)
+        self.assertEqual(self.queue.get(aid).status, "expired")
+        self.assertFalse(self.queue.is_approved(aid))
+
+        fresh = self.queue.submit(self.req, "over threshold", "manager@corp")
+        self.queue.decide(fresh, "manager@corp", True)
+        self.queue.get(fresh).expires_at = now() - timedelta(seconds=1)
+        with self.assertRaises(ValueError):
+            self.queue.consume(fresh)
+        self.assertEqual(self.queue.get(fresh).status, "expired")
+
+    def test_digest_binds_the_request(self):
+        aid = self.queue.submit(self.req, "over threshold", "manager@corp")
+        self.queue.decide(aid, "manager@corp", True)
+        self.queue.get(aid).request.params["amount"] = 999
+        self.assertFalse(self.queue.is_approved(aid))
+        with self.assertRaises(ValueError) as caught:
+            self.queue.consume(aid)
+        self.assertIn("not bound", str(caught.exception))
+        self.assertEqual(self.queue.get(aid).status, "approved")
+
 
 if __name__ == "__main__":
     unittest.main()

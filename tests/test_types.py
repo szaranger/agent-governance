@@ -1,5 +1,5 @@
 import unittest
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 from agent_governance import AgentCharter, ImpactAssessment, Tier, now
 
@@ -39,6 +39,17 @@ class ImpactAssessmentTests(unittest.TestCase):
         ok, why = a.satisfies(Tier.MEDIUM)
         self.assertFalse(ok)
         self.assertEqual(why, "pre-deployment simulation has not passed")
+
+
+class CharterDigestTests(unittest.TestCase):
+    def test_digest_is_stable_and_changes_with_policy(self):
+        fixed = datetime(2030, 1, 1, tzinfo=timezone.utc)
+        first = make_charter(authority_expires=fixed)
+        second = make_charter(authority_expires=fixed)
+        self.assertEqual(first.digest(), first.digest())
+        self.assertEqual(first.digest(), second.digest())
+        second.prohibited_actions = set(second.prohibited_actions) | {"export_data"}
+        self.assertNotEqual(first.digest(), second.digest())
 
 
 if __name__ == "__main__":

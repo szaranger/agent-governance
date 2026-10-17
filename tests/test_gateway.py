@@ -290,6 +290,91 @@ class AuditIntegrationTests(unittest.TestCase):
                                    data_classes={"procurement"}))
         self.assertGreater(len(gw.audit.entries), before)
         self.assertTrue(gw.audit.verify())
+        decision = gw.audit.entries[-1]
+        self.assertEqual(decision["event"], "action_decision")
+        self.assertEqual(decision["charter_hash"], gw.charter.digest())
+        self.assertEqual(decision["reason"], "within delegated authority")
+        self.assertTrue(all("charter_hash" in entry for entry in gw.audit.entries))
+
+
+class FailClosedTests(unittest.TestCase):
+    def test_unexpected_evaluation_error_denies(self):
+        gw = GovernanceGateway(make_charter())
+        deploy(gw)
+        gw.charter.allowed_data_classes = None
+        r = gw.authorize(ActionRequest(agent_id="procurement-agent-01", tool="erp",
+                                       action="create_purchase_order",
+                                       params={"amount": 100, "vendor_approved": True},
+                                       data_classes={"procurement"}))
+        self.assertEqual(r.decision, Decision.DENY)
+        self.assertIn("failed closed", r.reason)
+        self.assertTrue(gw.audit.verify())
+
+
+class ReleasePolicyTests(unittest.TestCase):
+    def setUp(self):
+        self.gw = GovernanceGateway(make_charter())
+        deploy(self.gw)
+
+    def approved_id(self) -> str:
+        result = self.gw.authorize(ActionRequest(
+            agent_id="procurement-agent-01", tool="erp", action="create_purchase_order",
+            params={"amount": 12_000, "vendor_approved": True},
+            data_classes={"procurement"}, on_behalf_of="alice@corp"))
+        self.gw.approvals.decide(result.approval_id, "proc-manager@corp", True)
+        return result.approval_id
+
+    def test_release_denied_when_policy_no_longer_allows_it(self):
+        aid = self.approved_id()
+        self.gw.charter.tools["erp"].hard_limit = 10_000
+        released = self.gw.execute_approved(aid)
+        self.assertEqual(released.decision, Decision.DENY)
+        self.assertIn("hard limit", released.reason)
+        self.assertEqual(self.gw.approvals.get(aid).status, "approved")
+
+    def test_release_denied_when_payload_changes(self):
+        aid = self.approved_id()
+        self.gw.approvals.get(aid).request.params["amount"] = 1
+        released = self.gw.execute_approved(aid)
+        self.assertEqual(released.decision, Decision.DENY)
+        self.assertIn("not bound", released.reason)
+        self.assertEqual(self.gw.approvals.get(aid).status, "approved")
+
+    def test_release_denied_when_approval_expired(self):
+        aid = self.approved_id()
+        self.gw.approvals.get(aid).expires_at = now() - timedelta(seconds=1)
+        released = self.gw.execute_approved(aid)
+        self.assertEqual(released.decision, Decision.DENY)
+        self.assertIn("expired", released.reason)
+        self.assertEqual(self.gw.approvals.get(aid).status, "expired")
+
+
+class DriftTripwireTests(unittest.TestCase):
+    def test_tripwire_suspends_when_deny_rate_trips(self):
+        gw = GovernanceGateway(make_charter())
+        deploy(gw)
+        req = ActionRequest(agent_id="procurement-agent-01", tool="erp", action="add_vendor",
+                            params={}, data_classes={"procurement"})
+        for _ in range(19):
+            gw.authorize(req)
+        self.assertEqual(gw.state, Lifecycle.DEPLOYED)
+        gw.authorize(req)
+        self.assertEqual(gw.state, Lifecycle.SUSPENDED)
+        suspended = next(e for e in reversed(gw.audit.entries) if e["event"] == "suspended")
+        self.assertTrue(suspended["automatic"])
+        self.assertEqual(suspended["by"], "drift-monitor")
+        follow = gw.authorize(req)
+        self.assertEqual(follow.decision, Decision.DENY)
+        self.assertIn("not operational", follow.reason)
+
+    def test_tripwire_can_be_disabled(self):
+        gw = GovernanceGateway(make_charter(), tripwire=False)
+        deploy(gw)
+        req = ActionRequest(agent_id="procurement-agent-01", tool="erp", action="add_vendor",
+                            params={}, data_classes={"procurement"})
+        for _ in range(20):
+            gw.authorize(req)
+        self.assertEqual(gw.state, Lifecycle.DEPLOYED)
 
 
 if __name__ == "__main__":
