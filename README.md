@@ -30,6 +30,14 @@ agent-governance/
     └── demo.py        # procurement-agent demo
 ```
 
+## Installation
+
+```bash
+pip install agentic-governance
+```
+
+Requires Python 3.10+. The package has no runtime dependencies.
+
 ## Quick start
 
 Using [uv](https://docs.astral.sh/uv/) (recommended):
